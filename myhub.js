@@ -1,177 +1,161 @@
-const fs = require('fs-extra');
+#!/usr/bin/env node
+
+const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const archiver = require('archiver');
 
-const DB_FILE = path.join(__dirname, 'myhub.json');
-const PROJECTS_DIR = path.join(__dirname, 'projects');
-const REMOTE_DIR = path.join(__dirname, 'remote');
-
-function loadDB() {
-  if (!fs.existsSync(DB_FILE)) return { projects: [] };
-  return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
-}
-
-function saveDB(db) {
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-}
-
-function getTimeStamp() {
-  return new Date().toISOString().replace(/[:.]/g, '-');
-}
-
-function getProjectPath(name) {
-  return path.join(PROJECTS_DIR, name);
-}
-
-function createProject(name) {
-  const db = loadDB();
-  if (db.projects.find(p => p.name === name)) {
-    return console.log('❌ Project already exists.');
+// Utility to get the repo root
+const getRepoRoot = () => {
+  let currentDir = process.cwd();
+  while (currentDir !== path.parse(currentDir).root) {
+    if (fs.existsSync(path.join(currentDir, '.myhub'))) {
+      return currentDir;
+    }
+    currentDir = path.dirname(currentDir);
   }
+  return null;
+};
 
-  const projectPath = getProjectPath(name);
-  fs.ensureDirSync(projectPath);
-  fs.writeFileSync(path.join(projectPath, 'README.md'), `# ${name}\n`);
-  db.projects.push({ name, createdAt: new Date().toISOString() });
-  saveDB(db);
-  console.log(`✅ Created project "${name}" at ${projectPath}`);
-}
-
-function listProjects() {
-  const db = loadDB();
-  if (db.projects.length === 0) {
-    return console.log('📂 No projects found.');
-  }
-  db.projects.forEach(p => {
-    console.log(`📁 ${p.name} (created ${p.createdAt})`);
-  });
-}
-
-function saveVersion(name, msg = '') {
-  const db = loadDB();
-  const project = db.projects.find(p => p.name === name);
-  if (!project) return console.log('❌ Project not found.');
-
-  const projectPath = getProjectPath(name);
-  const versionsPath = path.join(projectPath, '.versions');
-  fs.ensureDirSync(versionsPath);
-
-  const timestamp = getTimeStamp();
-  const versionPath = path.join(versionsPath, timestamp);
-  fs.copySync(projectPath, versionPath, {
-    filter: (src) => !src.includes('.versions')
-  });
-
-  const logPath = path.join(versionsPath, 'log.txt');
-  const logEntry = `${timestamp} - ${msg}\n`;
-  fs.appendFileSync(logPath, logEntry);
-
-  console.log(`📦 Saved version at ${versionPath}`);
-}
-
-function showHistory(name) {
-  const projectPath = getProjectPath(name);
-  const logPath = path.join(projectPath, '.versions', 'log.txt');
-  if (!fs.existsSync(logPath)) return console.log('❌ No version history.');
-
-  const log = fs.readFileSync(logPath, 'utf8');
-  console.log(`📜 Version history for ${name}:\n${log}`);
-}
-
-function restoreVersion(name, timestamp) {
-  const projectPath = getProjectPath(name);
-  const versionPath = path.join(projectPath, '.versions', timestamp);
-  if (!fs.existsSync(versionPath)) return console.log('❌ Version not found.');
-
-  fs.copySync(versionPath, projectPath, {
-    filter: src => !src.includes('.versions')
-  });
-
-  console.log(`🔄 Restored version from ${timestamp}`);
-}
-
-function pushProject(name) {
-  const db = loadDB();
-  const project = db.projects.find(p => p.name === name);
-  if (!project) return console.log('❌ Project not found.');
-
-  const projectPath = getProjectPath(name);
-  const remotePath = path.join(REMOTE_DIR, name);
-  fs.ensureDirSync(REMOTE_DIR);
-
-  const zipFile = path.join(remotePath + '-' + getTimeStamp() + '.zip');
-  const output = fs.createWriteStream(zipFile);
-  const archive = archiver('zip', { zlib: { level: 9 } });
-
-  // ✅ NEW: Load ignore patterns from .myhubignore if exists
-  const ignorePath = path.join(projectPath, '.myhubignore');
-  let ignorePatterns = [];
-
+// 🟨 NEW: Read .myhubignore
+function readIgnoreList(repoRoot) {
+  const ignorePath = path.join(repoRoot, '.myhubignore');
   if (fs.existsSync(ignorePath)) {
-    ignorePatterns = fs.readFileSync(ignorePath, 'utf-8')
+    return fs.readFileSync(ignorePath, 'utf-8')
       .split('\n')
       .map(line => line.trim())
       .filter(line => line && !line.startsWith('#'));
   }
-
-  // ✅ NEW: Helper to check if file should be ignored
-  const shouldIgnore = (filePath) => {
-    return ignorePatterns.some(pattern =>
-      filePath.includes(pattern.replace(/\/$/, '')) // handle "dir/" vs "dir"
-    );
-  };
-
-  output.on('close', () => {
-    console.log(`📤 Pushed to remote: ${zipFile} (${archive.pointer()} bytes)`);
-  });
-
-  archive.on('error', err => {
-    throw err;
-  });
-
-  archive.pipe(output);
-
-  // ✅ NEW: Recursively add files except ignored ones
-  const walkAndAdd = (base, rel = '') => {
-    const fullPath = path.join(base, rel);
-    const items = fs.readdirSync(fullPath);
-
-    for (const item of items) {
-      const itemRelPath = path.join(rel, item);
-      const itemFullPath = path.join(base, itemRelPath);
-
-      if (shouldIgnore(itemRelPath)) continue;
-
-      const stats = fs.statSync(itemFullPath);
-      if (stats.isDirectory()) {
-        walkAndAdd(base, itemRelPath);
-      } else {
-        archive.file(itemFullPath, { name: itemRelPath });
-      }
-    }
-  };
-
-  walkAndAdd(projectPath);
-  archive.finalize();
+  return [];
 }
 
-// 📦 CLI usage
+// 🟨 NEW: Check if file is ignored
+function isIgnored(file, ignoreList) {
+  return ignoreList.some(pattern => {
+    if (pattern.endsWith('/')) {
+      return file.startsWith(pattern.slice(0, -1));
+    }
+    return file === pattern || file.includes(pattern);
+  });
+}
+
+// ✅ Modified: Init repo
+function initRepo() {
+  const repoPath = path.join(process.cwd(), '.myhub');
+  if (fs.existsSync(repoPath)) {
+    console.log('Repository already initialized.');
+    return;
+  }
+
+  fs.mkdirSync(repoPath);
+  fs.mkdirSync(path.join(repoPath, 'commits'));
+  fs.writeFileSync(path.join(repoPath, 'index.json'), JSON.stringify([]));
+
+  // 🟨 ADDED: Create default .myhubignore
+  fs.writeFileSync(path.join(process.cwd(), '.myhubignore'), 'node_modules/\n.env\n.DS_Store\n*.log\n');
+
+  console.log('Initialized empty myhub repository.');
+}
+
+// ✅ Modified: Add file to staging
+function addFile(filePath) {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.log('Not inside a myhub repo.');
+    return;
+  }
+
+  const fullPath = path.join(repoRoot, filePath);
+  if (!fs.existsSync(fullPath)) {
+    console.log('File does not exist.');
+    return;
+  }
+
+  // 🟨 ADDED: Ignore check
+  const ignoreList = readIgnoreList(repoRoot);
+  if (isIgnored(filePath, ignoreList)) {
+    console.log(`Skipping ignored file: ${filePath}`);
+    return;
+  }
+
+  const indexPath = path.join(repoRoot, '.myhub', 'index.json');
+  const index = JSON.parse(fs.readFileSync(indexPath));
+  if (!index.includes(filePath)) {
+    index.push(filePath);
+    fs.writeFileSync(indexPath, JSON.stringify(index));
+    console.log(`Staged ${filePath}`);
+  } else {
+    console.log(`${filePath} is already staged.`);
+  }
+}
+
+// ✅ Existing: Commit changes
+function commitChanges(message) {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.log('Not inside a myhub repo.');
+    return;
+  }
+
+  const indexPath = path.join(repoRoot, '.myhub', 'index.json');
+  const index = JSON.parse(fs.readFileSync(indexPath));
+  if (index.length === 0) {
+    console.log('Nothing to commit.');
+    return;
+  }
+
+  const commit = {
+    timestamp: new Date().toISOString(),
+    message,
+    files: [...index],
+  };
+
+  const commitPath = path.join(repoRoot, '.myhub', 'commits', `${Date.now()}.json`);
+  fs.writeFileSync(commitPath, JSON.stringify(commit, null, 2));
+  fs.writeFileSync(indexPath, JSON.stringify([]));
+  console.log('Committed:', message);
+}
+
+// ✅ Existing: Show commit log
+function showLog() {
+  const repoRoot = getRepoRoot();
+  if (!repoRoot) {
+    console.log('Not inside a myhub repo.');
+    return;
+  }
+
+  const commitsDir = path.join(repoRoot, '.myhub', 'commits');
+  const commits = fs.readdirSync(commitsDir)
+    .map(file => JSON.parse(fs.readFileSync(path.join(commitsDir, file))))
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+
+  commits.forEach((commit, index) => {
+    console.log(`\nCommit ${index + 1}:`);
+    console.log(`Date: ${commit.timestamp}`);
+    console.log(`Message: ${commit.message}`);
+    console.log(`Files: ${commit.files.join(', ')}`);
+  });
+}
+
+// ✅ CLI Entry Point
 const [,, cmd, ...args] = process.argv;
 
 switch (cmd) {
-  case 'create': createProject(args[0]); break;
-  case 'list': listProjects(); break;
-  case 'save': saveVersion(args[0], args.slice(1).join(' ')); break;
-  case 'history': showHistory(args[0]); break;
-  case 'restore': restoreVersion(args[0], args[1]); break;
-  case 'push': pushProject(args[0]); break;
+  case 'init':
+    initRepo();
+    break;
+  case 'add':
+    addFile(args[0]);
+    break;
+  case 'commit':
+    if (args[0] === '-m') {
+      commitChanges(args.slice(1).join(' '));
+    } else {
+      console.log('Use: myhub commit -m "message"');
+    }
+    break;
+  case 'log':
+    showLog();
+    break;
   default:
-    console.log(`📘 Usage:
-    node myhub.js create <name>
-    node myhub.js list
-    node myhub.js save <name> <message>
-    node myhub.js history <name>
-    node myhub.js restore <name> <timestamp>
-    node myhub.js push <name>`);
+    console.log('Commands: init | add <file> | commit -m "msg" | log');
 }
