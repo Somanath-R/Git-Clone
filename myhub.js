@@ -1,181 +1,186 @@
 #!/usr/bin/env node
 
-const fs = require("fs");
+const fs = require("fs-extra");
 const path = require("path");
-const simpleGit = require("simple-git"); // ✅ New dependency
-const os = require("os");
+const simpleGit = require("simple-git");
+const archiver = require("archiver");
 
-const myhubDir = path.join(process.cwd(), ".myhub");
-const stagingDir = path.join(myhubDir, "staging");
-const commitsDir = path.join(myhubDir, "commits");
-const logFile = path.join(myhubDir, "log.json");
-const ignoreFile = path.join(process.cwd(), ".myhubignore");
-const remotesFile = path.join(myhubDir, "remotes.json");
-
-// ✅ Utility to check if a file is ignored
-function isIgnored(filePath) {
-  if (!fs.existsSync(ignoreFile)) return false;
-  const ignorePatterns = fs.readFileSync(ignoreFile, "utf-8").split("\n").map(x => x.trim()).filter(Boolean);
-  return ignorePatterns.some(pattern => filePath.includes(pattern));
+// helper to get .myhub path
+function getMyHubDir() {
+  return path.join(process.cwd(), ".myhub");
 }
 
-// ✅ Init repo
-function initRepo() {
-  if (fs.existsSync(myhubDir)) {
-    console.log("Repository already initialized.");
+// Init command
+function handleInit() {
+  const myhubPath = getMyHubDir();
+  if (fs.existsSync(myhubPath)) {
+    console.log("✅ Already initialized.");
     return;
   }
-  fs.mkdirSync(myhubDir);
-  fs.mkdirSync(stagingDir);
-  fs.mkdirSync(commitsDir);
-  fs.writeFileSync(logFile, JSON.stringify([]));
-  fs.writeFileSync(remotesFile, JSON.stringify({}));
-  console.log("Initialized empty MyHub repository.");
+  fs.mkdirSync(myhubPath);
+  fs.writeJsonSync(path.join(myhubPath, "index.json"), []);
+  fs.writeJsonSync(path.join(myhubPath, "log.json"), []);
+  fs.writeJsonSync(path.join(myhubPath, "remotes.json"), {});
+  console.log("✅ Initialized myhub repository.");
 }
 
-// ✅ Stage file
-function stageFile(fileName) {
-  const srcPath = path.join(process.cwd(), fileName);
-  const destPath = path.join(stagingDir, fileName);
-
-  if (!fs.existsSync(srcPath)) return console.error(`❌ File "${fileName}" does not exist.`);
-  if (isIgnored(fileName)) return console.log(`⚠️  Skipped (ignored): ${fileName}`);
-
-  fs.mkdirSync(path.dirname(destPath), { recursive: true });
-  fs.copyFileSync(srcPath, destPath);
-  console.log(`✅ Staged: ${fileName}`);
-}
-
-// ✅ Commit staged files
-function commitChanges(message) {
-  if (!fs.existsSync(stagingDir)) return console.log("Nothing staged to commit.");
-
-  const commitId = Date.now().toString();
-  const commitPath = path.join(commitsDir, commitId);
-  fs.mkdirSync(commitPath);
-
-  copyDir(stagingDir, commitPath);
-  fs.rmSync(stagingDir, { recursive: true, force: true });
-  fs.mkdirSync(stagingDir);
-
-  const log = JSON.parse(fs.readFileSync(logFile));
-  log.push({ id: commitId, message, timestamp: new Date().toISOString() });
-  fs.writeFileSync(logFile, JSON.stringify(log, null, 2));
-
-  console.log(`✅ Commit successful: ${commitId}`);
-}
-
-// ✅ Copy dir recursively
-function copyDir(src, dest) {
-  const entries = fs.readdirSync(src, { withFileTypes: true });
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-    if (entry.isDirectory()) {
-      fs.mkdirSync(destPath, { recursive: true });
-      copyDir(srcPath, destPath);
-    } else {
-      fs.copyFileSync(srcPath, destPath);
-    }
+// Add command
+function handleAdd(file) {
+  const indexPath = path.join(getMyHubDir(), "index.json");
+  let index = fs.readJsonSync(indexPath);
+  if (!index.includes(file)) {
+    index.push(file);
+    fs.writeJsonSync(indexPath, index);
+    console.log(`✅ Staged: ${file}`);
+  } else {
+    console.log(`ℹ️ Already staged: ${file}`);
   }
 }
 
-// ✅ View log
-function showLog() {
-  if (!fs.existsSync(logFile)) return console.log("No commits found.");
-  const log = JSON.parse(fs.readFileSync(logFile));
-  log.forEach(entry => {
-    console.log(`\n📝 Commit: ${entry.id}`);
-    console.log(`📅 Date: ${entry.timestamp}`);
-    console.log(`💬 Message: ${entry.message}`);
+// Commit command
+function handleCommit(message) {
+  const indexPath = path.join(getMyHubDir(), "index.json");
+  const logPath = path.join(getMyHubDir(), "log.json");
+
+  if (!fs.existsSync(indexPath)) {
+    console.log("❌ Run 'myhub init' first.");
+    return;
+  }
+
+  const files = fs.readJsonSync(indexPath);
+  if (files.length === 0) {
+    console.log("Nothing staged to commit.");
+    return;
+  }
+
+  const timestamp = Date.now();
+  const commitFileName = `${timestamp}.zip`;
+  const commitPath = path.join(getMyHubDir(), commitFileName);
+
+  const output = fs.createWriteStream(commitPath);
+  const archive = archiver("zip");
+
+  output.on("close", () => {
+    let log = fs.readJsonSync(logPath);
+    log.push({ message, timestamp, files });
+    fs.writeJsonSync(logPath, log);
+    fs.writeJsonSync(indexPath, []);
+    console.log(`✅ Commit successful: ${timestamp}`);
+  });
+
+  archive.on("error", (err) => {
+    throw err;
+  });
+
+  archive.pipe(output);
+  files.forEach((file) => {
+    if (fs.existsSync(file)) {
+      archive.file(file, { name: file });
+    }
+  });
+
+  archive.finalize();
+}
+
+// Log command
+function handleLog() {
+  const logPath = path.join(getMyHubDir(), "log.json");
+  if (!fs.existsSync(logPath)) {
+    console.log("❌ No commits found. Run 'myhub init' and commit first.");
+    return;
+  }
+
+  const logs = fs.readJsonSync(logPath);
+  logs.forEach((entry, index) => {
+    console.log(`\nCommit #${index + 1}`);
+    console.log(`📝 Message: ${entry.message}`);
+    console.log(`🕒 Timestamp: ${entry.timestamp}`);
+    console.log(`📄 Files: ${entry.files.join(", ")}`);
   });
 }
 
-// ✅ Add a remote (myhub remote add origin <url>)
-function handleRemote(args) {
-  if (args[0] === "add" && args[1] && args[2]) {
-    const [_, name, url] = args;
-    const remotes = fs.existsSync(remotesFile)
-      ? JSON.parse(fs.readFileSync(remotesFile))
-      : {};
-    remotes[name] = url;
-    fs.writeFileSync(remotesFile, JSON.stringify(remotes, null, 2));
-    console.log(`✅ Remote "${name}" added: ${url}`);
-  } else {
-    console.log("❌ Usage: myhub remote add <name> <url>");
-  }
+// Remote add command
+function handleRemote(name, url) {
+  const remotesPath = path.join(getMyHubDir(), "remotes.json");
+  const remotes = fs.readJsonSync(remotesPath);
+  remotes[name] = url;
+  fs.writeJsonSync(remotesPath, remotes);
+  console.log(`✅ Remote '${name}' added: ${url}`);
 }
 
-// ✅ Pull latest code from remote (basic)
-async function handlePull(args) {
-  const remotes = fs.existsSync(remotesFile)
-    ? JSON.parse(fs.readFileSync(remotesFile))
-    : {};
+// Push command (NEW ✅)
+async function handlePush(name, branch) {
+  const remotesPath = path.join(getMyHubDir(), "remotes.json");
 
-  const remoteName = args[0] || "origin";
-  const url = remotes[remoteName];
-
-  if (!url) {
-    console.log(`❌ Remote "${remoteName}" not found. Add it using 'myhub remote add ${remoteName} <url>'`);
+  if (!fs.existsSync(remotesPath)) {
+    console.log("❌ No remotes found. Use 'myhub remote add <name> <url>'");
     return;
   }
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "myhub-pull-"));
-  const git = simpleGit();
+  const remotes = fs.readJsonSync(remotesPath);
+  const url = remotes[name];
 
-  console.log(`📥 Cloning from ${url} to temporary folder...`);
-  await git.clone(url, tmpDir);
-
-  const entries = fs.readdirSync(tmpDir);
-  for (const entry of entries) {
-    if (entry === ".git" || entry === ".myhub") continue;
-
-    const srcPath = path.join(tmpDir, entry);
-    const destPath = path.join(process.cwd(), entry);
-    if (isIgnored(entry)) {
-      console.log(`⚠️  Ignored during pull: ${entry}`);
-      continue;
-    }
-
-    fs.cpSync(srcPath, destPath, { recursive: true });
-    console.log(`✅ Pulled: ${entry}`);
+  if (!url) {
+    console.log(`❌ Remote '${name}' not found.`);
+    return;
   }
 
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  console.log(`🎉 Pull complete from remote "${remoteName}"`);
+  const git = simpleGit();
+
+  try {
+    // Init Git if not already
+    if (!fs.existsSync(".git")) {
+      await git.init();
+      console.log("✅ Git initialized.");
+    }
+
+    await git.addRemote(name, url).catch(() => {});
+    await git.add(".");
+    await git.commit(`myhub push commit`);
+    await git.push(name, branch);
+    console.log(`✅ Pushed to ${name}/${branch}`);
+  } catch (err) {
+    console.error("❌ Push failed:", err.message);
+  }
 }
 
-// ✅ Main CLI
+// Main dispatcher
 function main() {
-  const args = process.argv.slice(2);
-  const command = args[0];
+  const [cmd, ...args] = process.argv.slice(2);
 
-  switch (command) {
+  switch (cmd) {
     case "init":
-      initRepo();
+      handleInit();
       break;
     case "add":
-      stageFile(args[1]);
+      handleAdd(args[0]);
       break;
     case "commit":
-      if (args[1] === "-m" && args[2]) {
-        commitChanges(args.slice(2).join(" "));
+      if (args[0] === "-m" && args[1]) {
+        handleCommit(args.slice(1).join(" "));
       } else {
         console.log("❌ Usage: myhub commit -m \"message\"");
       }
       break;
     case "log":
-      showLog();
+      handleLog();
       break;
     case "remote":
-      handleRemote(args.slice(1));
+      if (args[0] === "add" && args[1] && args[2]) {
+        handleRemote(args[1], args[2]);
+      } else {
+        console.log("❌ Usage: myhub remote add <name> <url>");
+      }
       break;
-    case "pull":
-      handlePull(args.slice(1));
+    case "push":
+      if (args[0] && args[1]) {
+        handlePush(args[0], args[1]);
+      } else {
+        console.log("❌ Usage: myhub push <remote-name> <branch>");
+      }
       break;
     default:
-      console.log(`❌ Unknown command: ${command}`);
-      break;
+      console.log(`❌ Unknown command: ${cmd}`);
   }
 }
 
