@@ -1,161 +1,139 @@
 #!/usr/bin/env node
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const fs = require("fs");
+const path = require("path");
 
-// Utility to get the repo root
-const getRepoRoot = () => {
-  let currentDir = process.cwd();
-  while (currentDir !== path.parse(currentDir).root) {
-    if (fs.existsSync(path.join(currentDir, '.myhub'))) {
-      return currentDir;
-    }
-    currentDir = path.dirname(currentDir);
-  }
-  return null;
-};
+const myhubDir = path.join(process.cwd(), ".myhub");
+const stagingDir = path.join(myhubDir, "staging");
+const commitsDir = path.join(myhubDir, "commits");
+const logFile = path.join(myhubDir, "log.json");
+const ignoreFile = path.join(process.cwd(), ".myhubignore");
+const remotesFile = path.join(myhubDir, "remotes.json"); // ✅ NEW for remote URLs
 
-// 🟨 NEW: Read .myhubignore
-function readIgnoreList(repoRoot) {
-  const ignorePath = path.join(repoRoot, '.myhubignore');
-  if (fs.existsSync(ignorePath)) {
-    return fs.readFileSync(ignorePath, 'utf-8')
-      .split('\n')
-      .map(line => line.trim())
-      .filter(line => line && !line.startsWith('#'));
-  }
-  return [];
+// ✅ Utility to check if a file is ignored
+function isIgnored(filePath) {
+  if (!fs.existsSync(ignoreFile)) return false;
+  const ignorePatterns = fs.readFileSync(ignoreFile, "utf-8").split("\n").map(x => x.trim()).filter(Boolean);
+  return ignorePatterns.some(pattern => filePath.includes(pattern));
 }
 
-// 🟨 NEW: Check if file is ignored
-function isIgnored(file, ignoreList) {
-  return ignoreList.some(pattern => {
-    if (pattern.endsWith('/')) {
-      return file.startsWith(pattern.slice(0, -1));
-    }
-    return file === pattern || file.includes(pattern);
-  });
-}
-
-// ✅ Modified: Init repo
+// ✅ Init repo
 function initRepo() {
-  const repoPath = path.join(process.cwd(), '.myhub');
-  if (fs.existsSync(repoPath)) {
-    console.log('Repository already initialized.');
+  if (fs.existsSync(myhubDir)) {
+    console.log("Repository already initialized.");
     return;
   }
-
-  fs.mkdirSync(repoPath);
-  fs.mkdirSync(path.join(repoPath, 'commits'));
-  fs.writeFileSync(path.join(repoPath, 'index.json'), JSON.stringify([]));
-
-  // 🟨 ADDED: Create default .myhubignore
-  fs.writeFileSync(path.join(process.cwd(), '.myhubignore'), 'node_modules/\n.env\n.DS_Store\n*.log\n');
-
-  console.log('Initialized empty myhub repository.');
+  fs.mkdirSync(myhubDir);
+  fs.mkdirSync(stagingDir);
+  fs.mkdirSync(commitsDir);
+  fs.writeFileSync(logFile, JSON.stringify([]));
+  fs.writeFileSync(remotesFile, JSON.stringify({})); // ✅ create empty remotes
+  console.log("Initialized empty MyHub repository.");
 }
 
-// ✅ Modified: Add file to staging
-function addFile(filePath) {
-  const repoRoot = getRepoRoot();
-  if (!repoRoot) {
-    console.log('Not inside a myhub repo.');
-    return;
-  }
+// ✅ Stage file
+function stageFile(fileName) {
+  const srcPath = path.join(process.cwd(), fileName);
+  const destPath = path.join(stagingDir, fileName);
 
-  const fullPath = path.join(repoRoot, filePath);
-  if (!fs.existsSync(fullPath)) {
-    console.log('File does not exist.');
-    return;
-  }
+  if (!fs.existsSync(srcPath)) return console.error(`❌ File "${fileName}" does not exist.`);
+  if (isIgnored(fileName)) return console.log(`⚠️  Skipped (ignored): ${fileName}`);
 
-  // 🟨 ADDED: Ignore check
-  const ignoreList = readIgnoreList(repoRoot);
-  if (isIgnored(filePath, ignoreList)) {
-    console.log(`Skipping ignored file: ${filePath}`);
-    return;
-  }
-
-  const indexPath = path.join(repoRoot, '.myhub', 'index.json');
-  const index = JSON.parse(fs.readFileSync(indexPath));
-  if (!index.includes(filePath)) {
-    index.push(filePath);
-    fs.writeFileSync(indexPath, JSON.stringify(index));
-    console.log(`Staged ${filePath}`);
-  } else {
-    console.log(`${filePath} is already staged.`);
-  }
+  fs.mkdirSync(path.dirname(destPath), { recursive: true });
+  fs.copyFileSync(srcPath, destPath);
+  console.log(`✅ Staged: ${fileName}`);
 }
 
-// ✅ Existing: Commit changes
+// ✅ Commit staged files
 function commitChanges(message) {
-  const repoRoot = getRepoRoot();
-  if (!repoRoot) {
-    console.log('Not inside a myhub repo.');
-    return;
-  }
+  if (!fs.existsSync(stagingDir)) return console.log("Nothing staged to commit.");
 
-  const indexPath = path.join(repoRoot, '.myhub', 'index.json');
-  const index = JSON.parse(fs.readFileSync(indexPath));
-  if (index.length === 0) {
-    console.log('Nothing to commit.');
-    return;
-  }
+  const commitId = Date.now().toString();
+  const commitPath = path.join(commitsDir, commitId);
+  fs.mkdirSync(commitPath);
 
-  const commit = {
-    timestamp: new Date().toISOString(),
-    message,
-    files: [...index],
-  };
+  copyDir(stagingDir, commitPath);
+  fs.rmSync(stagingDir, { recursive: true, force: true });
+  fs.mkdirSync(stagingDir);
 
-  const commitPath = path.join(repoRoot, '.myhub', 'commits', `${Date.now()}.json`);
-  fs.writeFileSync(commitPath, JSON.stringify(commit, null, 2));
-  fs.writeFileSync(indexPath, JSON.stringify([]));
-  console.log('Committed:', message);
+  const log = JSON.parse(fs.readFileSync(logFile));
+  log.push({ id: commitId, message, timestamp: new Date().toISOString() });
+  fs.writeFileSync(logFile, JSON.stringify(log, null, 2));
+
+  console.log(`✅ Commit successful: ${commitId}`);
 }
 
-// ✅ Existing: Show commit log
-function showLog() {
-  const repoRoot = getRepoRoot();
-  if (!repoRoot) {
-    console.log('Not inside a myhub repo.');
-    return;
+// ✅ Copy dir recursively
+function copyDir(src, dest) {
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      fs.mkdirSync(destPath, { recursive: true });
+      copyDir(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
   }
+}
 
-  const commitsDir = path.join(repoRoot, '.myhub', 'commits');
-  const commits = fs.readdirSync(commitsDir)
-    .map(file => JSON.parse(fs.readFileSync(path.join(commitsDir, file))))
-    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-
-  commits.forEach((commit, index) => {
-    console.log(`\nCommit ${index + 1}:`);
-    console.log(`Date: ${commit.timestamp}`);
-    console.log(`Message: ${commit.message}`);
-    console.log(`Files: ${commit.files.join(', ')}`);
+// ✅ View log
+function showLog() {
+  if (!fs.existsSync(logFile)) return console.log("No commits found.");
+  const log = JSON.parse(fs.readFileSync(logFile));
+  log.forEach(entry => {
+    console.log(`\n📝 Commit: ${entry.id}`);
+    console.log(`📅 Date: ${entry.timestamp}`);
+    console.log(`💬 Message: ${entry.message}`);
   });
 }
 
-// ✅ CLI Entry Point
-const [,, cmd, ...args] = process.argv;
+// ✅ Handle `myhub remote add <name> <url>`
+function handleRemote(args) {
+  if (args[0] === "add" && args[1] && args[2]) {
+    const [_, name, url] = args;
+    const remotes = fs.existsSync(remotesFile)
+      ? JSON.parse(fs.readFileSync(remotesFile))
+      : {};
 
-switch (cmd) {
-  case 'init':
-    initRepo();
-    break;
-  case 'add':
-    addFile(args[0]);
-    break;
-  case 'commit':
-    if (args[0] === '-m') {
-      commitChanges(args.slice(1).join(' '));
-    } else {
-      console.log('Use: myhub commit -m "message"');
-    }
-    break;
-  case 'log':
-    showLog();
-    break;
-  default:
-    console.log('Commands: init | add <file> | commit -m "msg" | log');
+    remotes[name] = url;
+    fs.writeFileSync(remotesFile, JSON.stringify(remotes, null, 2));
+    console.log(`✅ Remote "${name}" added: ${url}`);
+  } else {
+    console.log("❌ Usage: myhub remote add <name> <url>");
+  }
 }
+
+// ✅ Main CLI handler
+function main() {
+  const args = process.argv.slice(2);
+  const command = args[0];
+
+  switch (command) {
+    case "init":
+      initRepo();
+      break;
+    case "add":
+      stageFile(args[1]);
+      break;
+    case "commit":
+      if (args[1] === "-m" && args[2]) {
+        commitChanges(args.slice(2).join(" "));
+      } else {
+        console.log("❌ Usage: myhub commit -m \"message\"");
+      }
+      break;
+    case "log":
+      showLog();
+      break;
+    case "remote":
+      handleRemote(args.slice(1)); // ✅ handle remote command
+      break;
+    default:
+      console.log(`Unknown command: ${command}`);
+      break;
+  }
+}
+
+main();
